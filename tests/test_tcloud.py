@@ -500,3 +500,95 @@ def test_changed_auth_url_is_written_through_before_login(tccli_dir, monkeypatch
     assert calls == []
     tcloud.ensure_configured("p", OTHER)
     assert len(calls) == 1 and "configure" in calls[0] and OTHER in calls[0]
+
+
+# ------------------------------------------------------------------ tke ingress
+
+
+KUBE_ITEM = {
+    "metadata": {"namespace": "tools", "name": "wiki"},
+    "spec": {"ingressClassName": "nginx-private", "rules": [
+        {"host": "wiki.example.com", "http": {"paths": [
+            {"path": "/", "backend": {"service": {"name": "wiki", "port": {"number": 8080}}}}]}},
+        {"host": "docs.example.com", "http": {"paths": [
+            {"path": "/", "backend": {"service": {"name": "docs", "port": {"name": "http"}}}}]}}]},
+    "status": {"loadBalancer": {"ingress": [{"ip": "10.0.0.10"}]}},
+}
+
+
+def test_ingress_row_maps_hosts_class_address_and_backends():
+    assert tcloud.ingress_row(KUBE_ITEM) == {
+        "id": "tools/wiki", "class": "nginx-private", "hosts": "docs.example.com,wiki.example.com",
+        "address": "10.0.0.10", "backends": "docs:http,wiki:8080"}
+
+
+def test_ingress_row_falls_back_to_the_class_annotation_and_lb_hostname():
+    row = tcloud.ingress_row({
+        "metadata": {"namespace": "a", "name": "b",
+                     "annotations": {"kubernetes.io/ingress.class": "legacy"}},
+        "spec": {"defaultBackend": {"service": {"name": "fallback", "port": {"number": 80}}}},
+        "status": {"loadBalancer": {"ingress": [{"hostname": "lb.example.com"}]}}})
+    assert (row["class"], row["hosts"], row["address"], row["backends"]) == (
+        "legacy", "-", "lb.example.com", "fallback:80")
+
+
+def fake_kubectl(monkeypatch, returncode=0, stdout=None, stderr=""):
+    seen = {}
+    monkeypatch.setattr(tcloud.shutil, "which", lambda name: "/usr/bin/kubectl")
+    monkeypatch.setattr(tcloud, "tccli_json", lambda argv, profile, region=None: (
+        seen.update(argv=argv) or {"Kubeconfig": "apiVersion: v1\n"}))
+
+    def fake_run(cmd, **kw):
+        path = kw["env"]["KUBECONFIG"]
+        seen.update(cmd=cmd, path=path, content=open(path).read(),
+                    file_mode=os.stat(path).st_mode & 0o777,
+                    dir_mode=os.stat(os.path.dirname(path)).st_mode & 0o777)
+        body = json.dumps({"items": [KUBE_ITEM]}) if stdout is None else stdout
+        return subprocess.CompletedProcess(cmd, returncode, stdout=body, stderr=stderr)
+
+    monkeypatch.setattr(tcloud, "run", fake_run)
+    return seen
+
+
+def test_kube_ingresses_uses_a_private_throwaway_kubeconfig(monkeypatch):
+    seen = fake_kubectl(monkeypatch)
+    assert tcloud.kube_ingresses("p", "r1", "cls-a") == [KUBE_ITEM]
+    assert seen["argv"][:4] == ["tke", "DescribeClusterKubeconfig", "--ClusterId", "cls-a"]
+    assert "--all-namespaces" in seen["cmd"]
+    assert seen["content"] == "apiVersion: v1\n"
+    assert (seen["file_mode"], seen["dir_mode"]) == (0o600, 0o700)
+    assert not os.path.exists(seen["path"])  # gone as soon as kubectl returns
+
+
+def test_kube_ingresses_surfaces_a_forbidden_cluster_and_still_cleans_up(monkeypatch):
+    seen = fake_kubectl(monkeypatch, returncode=1, stdout="",
+                        stderr="Error from server (Forbidden): ingresses is forbidden")
+    with pytest.raises(ValueError, match="Forbidden"):
+        tcloud.kube_ingresses("p", "r1", "cls-a")
+    assert not os.path.exists(seen["path"])
+
+
+def test_kube_ingresses_needs_kubectl(monkeypatch):
+    monkeypatch.setattr(tcloud.shutil, "which", lambda name: None)
+    with pytest.raises(ValueError, match="kubectl not found"):
+        tcloud.kube_ingresses("p", "r1", "cls-a")
+
+
+def test_tke_ingress_scan_keeps_rows_when_one_cluster_is_forbidden(monkeypatch, capsys):
+    monkeypatch.setattr(tcloud, "fetch_all", lambda argv, key, profile, region=None, **kw: [
+        {"ClusterId": "cls-%s" % profile, "ClusterName": ""}])
+
+    def fake_ingresses(profile, region, cluster_id):
+        if profile == "p2":
+            raise ValueError("Error from server (Forbidden): ingresses is forbidden")
+        return [KUBE_ITEM]
+
+    monkeypatch.setattr(tcloud, "kube_ingresses", fake_ingresses)
+    with pytest.raises(SystemExit) as exit_info:
+        tcloud.cmd_resource(scan_args(action="ingress"), SCAN_PROFILES)
+    out = json.loads(capsys.readouterr().out)
+    assert exit_info.value.code == 1
+    assert [(r["profile"], r["cluster"], r["id"]) for r in out["ingresses"]] == [
+        ("p1", "cls-p1", "tools/wiki")]
+    assert out["probes"] == 2
+    assert out["errors"][0]["profile"] == "p2" and "Forbidden" in out["errors"][0]["error"]

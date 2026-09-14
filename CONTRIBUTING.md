@@ -28,7 +28,9 @@ Resource scanners are declarative. Adding a service is one entry in the `RESOURC
 table: the Describe call, the result key, a `regional` flag, the columns, and a row
 mapper. The scanner, parallelism, region fan-out, filtering, JSON output and the
 probe/error denominator all come for free. Sub-resources that hang off a parent
-(`tke nodes`, `ccn routes`) go under the parent's `children`.
+(`tke nodes`, `ccn routes`) go under the parent's `children`. A child whose data is
+not a Tencent API (`tke ingress` reads Kubernetes) supplies a
+`fetch(profile, region, parent_id)` callable instead of `argv`.
 
 Before adding one, **check whether the resource is regional or account-global**.
 Query the same profile from two different regions and compare. Getting this wrong

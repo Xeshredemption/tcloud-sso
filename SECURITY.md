@@ -40,8 +40,13 @@ for any account, with no browser and no MFA, for as long as it lives.
 - **Unguessable login nonce.** It comes from `secrets`.
 - **Bounded wait.** An approval nobody acts on gives up after `--timeout` (default
   10 minutes) instead of waiting forever.
+- **Throwaway kubeconfigs.** `tke ingress` fetches a cluster kubeconfig, which holds a
+  client credential, into a private temp directory (`0700`, file `0600`) for one
+  `kubectl` call and deletes it straight after. `~/.kube/config` is never read or
+  changed.
 - **No telemetry.** tcloud talks only to Tencent Cloud endpoints, through tccli, and
-  opens your SSO url in a browser. Nothing else.
+  opens your SSO url in a browser. `tke ingress` also calls the cluster's own
+  Kubernetes API through kubectl. Nothing else.
 
 ### What tcloud cannot do
 

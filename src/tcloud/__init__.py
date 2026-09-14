@@ -21,6 +21,7 @@ registry (~/.tccli/accounts.conf) and drives tccli from it.
   tcloud clb ls              list load balancers
   tcloud stock ls            instance-type availability; --charge/--zone narrow it
   tcloud tke ls|addons|nodes tke clusters, their addons, their nodes
+  tcloud tke ingress         ingresses in a cluster (needs kubectl + cluster RBAC)
   tcloud ccn ls              list cloud connect networks (global, one probe/profile)
   tcloud ccn routes          ccn routes; --ccn-id when a profile has more than one
   tcloud ccn attachments     ccn attachments, including PENDING ones
@@ -36,10 +37,12 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import string
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import uuid
@@ -889,6 +892,63 @@ def ips(value):
     return ",".join(value or []) or "-"
 
 
+def kube_ingresses(profile, region, cluster_id):
+    """Ingresses in one TKE cluster, read from Kubernetes itself.
+
+    Ingresses are not a Tencent api resource, so this fetches a throwaway intranet
+    kubeconfig through DescribeClusterKubeconfig and asks the cluster with kubectl.
+    That kubeconfig carries a client credential: it lives in a private temp dir
+    (0700, file 0600) only for the duration of one kubectl call and is never merged
+    into ~/.kube/config. A CAM role is not enough on its own — the cluster also has
+    to grant the sso user RBAC to list ingresses, or kubectl reports Forbidden.
+    """
+    kubectl = shutil.which("kubectl")
+    if not kubectl:
+        raise ValueError("kubectl not found on PATH (tke ingress reads the cluster through it)")
+    data = tccli_json(["tke", "DescribeClusterKubeconfig", "--ClusterId", cluster_id,
+                       "--IsExtranet", "false"], profile, region)
+    if not data.get("Kubeconfig"):
+        raise ValueError("no kubeconfig returned for %s" % cluster_id)
+    with tempfile.TemporaryDirectory(prefix="tcloud-kube-") as tmp:
+        path = os.path.join(tmp, "kubeconfig")
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w") as fh:
+            fh.write(data["Kubeconfig"])
+        result = run([kubectl, "get", "ingress", "--all-namespaces", "-o", "json",
+                      "--request-timeout=30s"], capture_output=True, text=True,
+                     env=dict(os.environ, KUBECONFIG=path))
+    if result.returncode != 0:
+        # kubectl prints an empty List on stdout alongside a Forbidden on stderr, so
+        # the exit code, not the payload, decides.
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        raise ValueError(detail[-1][:160] if detail else "kubectl failed for %s" % cluster_id)
+    try:
+        return json.loads(result.stdout).get("items") or []
+    except ValueError:
+        raise ValueError("unparseable kubectl output for %s" % cluster_id) from None
+
+
+def ingress_row(ing):
+    md, spec = ing.get("metadata") or {}, ing.get("spec") or {}
+    rules = spec.get("rules") or []
+    backends = set()
+    paths = [p.get("backend") for r in rules for p in ((r.get("http") or {}).get("paths") or [])]
+    for backend in [spec.get("defaultBackend")] + paths:
+        svc = (backend or {}).get("service") or {}
+        if svc:
+            port = svc.get("port") or {}
+            backends.add("%s:%s" % (svc.get("name"), port.get("number") or port.get("name")))
+    lb = ((ing.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
+    return {
+        "id": "%s/%s" % (md.get("namespace", "?"), md.get("name", "?")),
+        "class": (spec.get("ingressClassName")
+                  or (md.get("annotations") or {}).get("kubernetes.io/ingress.class") or "-"),
+        "hosts": ",".join(sorted({r.get("host") or "*" for r in rules})) or "-",
+        "address": ips([x.get("ip") or x.get("hostname") for x in lb
+                        if x.get("ip") or x.get("hostname")]),
+        "backends": ",".join(sorted(backends)) or "-",
+    }
+
+
 # Each resource is one Describe* call plus a row mapper. `regional` says whether the
 # result actually varies by region: CCN is account-global — DescribeCcns returns the
 # same set from every endpoint — so fanning it across 19 regions would report each
@@ -1094,6 +1154,20 @@ RESOURCES = {
                     "reason": (a.get("Reason") or "-")[:60],
                 },
             },
+            "ingress": {
+                # Not a Tencent api: ingresses live in Kubernetes, so this child reads
+                # them through the cluster itself (kube_ingresses) and needs kubectl
+                # plus RBAC inside the cluster, not just a CAM role.
+                "fetch": lambda profile, region, cluster_id: kube_ingresses(
+                    profile, region, cluster_id),
+                "noun": "ingress",
+                "plural": "ingresses",
+                "parent_column": "cluster",
+                "columns": (("cluster", "CLUSTER"), ("id", "INGRESS"), ("class", "CLASS"),
+                            ("hosts", "HOSTS"), ("address", "ADDRESS"),
+                            ("backends", "BACKENDS")),
+                "row": lambda i: ingress_row(i),
+            },
             "nodes": {
                 "argv": ["tke", "DescribeClusterInstances"],
                 "parent_arg": "--ClusterId",
@@ -1262,7 +1336,7 @@ def cmd_resource(args, profiles):
             # Some Describe* calls need a filter that is not pagination — stock has to
             # say which billing mode it means, since spot and pay-as-you-go carry
             # completely different inventory.
-            argv = spec["argv"] + (spec["argv_extra"](args) if spec.get("argv_extra") else [])
+            argv = spec.get("argv", []) + (spec["argv_extra"](args) if spec.get("argv_extra") else [])
             if action == "ls":
                 return name, region, fetch_all(argv, spec["key"], name, region,
                                                paginated=paginated), None
@@ -1270,8 +1344,12 @@ def cmd_resource(args, profiles):
             parents = resolve_parents(parent_spec, args, name, region)
             matched.update(parents)
             for parent_id in parents:
-                for item in fetch_all(spec["argv"] + [spec["parent_arg"], parent_id],
-                                      spec["key"], name, region, paginated=paginated):
+                # A child that is not a Tencent api (tke ingress reads Kubernetes)
+                # brings its own fetch instead of a Describe call.
+                fetched = (spec["fetch"](name, region, parent_id) if spec.get("fetch")
+                           else fetch_all(spec["argv"] + [spec["parent_arg"], parent_id],
+                                          spec["key"], name, region, paginated=paginated))
+                for item in fetched:
                     item["_parent"] = parent_id
                     items.append(item)
             return name, region, items, None
@@ -1298,7 +1376,7 @@ def cmd_resource(args, profiles):
             rows.append(row)
 
     if args.json:
-        print(json.dumps({spec["noun"].replace(" ", "_") + "s": rows,
+        print(json.dumps({(spec.get("plural") or spec["noun"] + "s").replace(" ", "_"): rows,
                           "probes": len(jobs),
                           "errors": [{"profile": n, "region": r, "error": e}
                                      for n, r, e in errors]}, indent=2))
@@ -1317,7 +1395,7 @@ def cmd_resource(args, profiles):
             tag = " %s[prod]%s" % (Colour.bad, Colour.off) if r["env"] == "prod" else ""
             print("%s%s" % (fmt % sum(zip(widths, [r[k] for k, _ in columns]), ()), tag))
     else:
-        print("%sno %ss%s" % (Colour.dim, spec["noun"], Colour.off))
+        print("%sno %s%s" % (Colour.dim, spec.get("plural") or spec["noun"] + "s", Colour.off))
 
     # Always state the denominator: an empty table is only meaningful next to the
     # number of probes that actually succeeded.

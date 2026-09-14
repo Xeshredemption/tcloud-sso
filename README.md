@@ -228,6 +228,7 @@ token copied before logout stays usable until it expires. See
 tcloud cvm ls                       # first profile in the registry
 tcloud vpc ls --all --home-region   # every profile, its configured region only
 tcloud tke nodes --cluster-id cls-xxxx
+tcloud tke ingress --cluster-id cls-xxxx
 tcloud stock ls --charge SPOTPAID --zone ap-singapore-2
 ```
 
@@ -240,12 +241,17 @@ tcloud stock ls --charge SPOTPAID --zone ap-singapore-2
 | `nat ls` | NAT gateways | regional |
 | `clb ls` | load balancers | regional |
 | `stock ls` | instance-type availability | regional |
-| `tke ls\|addons\|nodes` | TKE clusters, their addons, their nodes | regional |
+| `tke ls\|addons\|nodes\|ingress` | TKE clusters, their addons, nodes and ingresses | regional |
 | `ccn ls\|routes\|attachments` | cloud connect networks | **global** |
 
 Shared flags: `--profile NAME` (repeatable), `--all`, `--region` (repeatable),
 `--home-region` to skip the all-region fan-out, `--state` to filter, `--json`,
 `--workers N`.
+
+`tke ingress` reads Kubernetes, not a Tencent API. It needs `kubectl` on `PATH` and
+permission to list ingresses inside the cluster: a Tencent role alone is not enough,
+and a cluster without that permission shows up as an error. It fetches a throwaway
+kubeconfig for each cluster and never touches `~/.kube/config`.
 
 They all default to the **first profile in the registry**, not to everything —
 `--profile` or `--all` widens it.

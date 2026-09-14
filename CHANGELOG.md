@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `tke ingress`: lists a cluster's Kubernetes ingresses (hosts, class, address,
+  backends) through a throwaway kubeconfig. Needs `kubectl` and RBAC inside the
+  cluster; a forbidden cluster is reported as an error while other clusters still
+  return rows.
+
 ## [0.1.0] - 2026-09-14
 
 Initial public release.

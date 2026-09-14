@@ -1,0 +1,57 @@
+# tcloud registry — copy to ~/.tccli/accounts.conf and fill in your own accounts.
+#
+# tccli does NOT read this file. It is consumed by `tcloud`, which turns these
+# declarations into the right `tccli sso configure` / `tccli sso login` calls.
+#
+# Do NOT invent UINs. Run `tcloud discover <sso-url>` — it does one browser
+# approval, then prints every account behind that realm with its UIN, the roles
+# actually available in it, and a paste-ready block like the ones below.
+
+[defaults]
+# Applied to every profile unless the profile overrides it.
+role   = ReadOnly
+region = ap-singapore
+
+# auth_url is deliberately NOT set here. With more than one org, an inherited
+# default silently authenticates a new profile against the wrong realm; leaving it
+# required means a forgotten auth_url fails loudly instead of succeeding wrongly.
+
+# ---------------------------------------------------------------------- myorg
+# https://tencentcloudssointl.com/myorg/login
+#
+# The org slug in the url ("myorg") is the realm name — the unit of
+# authentication, and what `--sso myorg` matches on. One approval covers every
+# profile sharing an auth_url, however many there are.
+
+[profile app-dev]
+uin      = 200000000001
+env      = dev
+auth_url = https://tencentcloudssointl.com/myorg/login
+
+[profile ingress-nonprod]
+uin      = 200000000002
+env      = nonprod
+auth_url = https://tencentcloudssointl.com/myorg/login
+
+# env is informational: it colours `tcloud ls` and tags `[prod]` in `login --all`
+# output. Logging in mints credentials without changing anything, so prod is
+# visible rather than gated.
+
+[profile egress-prod]
+uin      = 200000000003
+env      = prod
+auth_url = https://tencentcloudssointl.com/myorg/login
+
+# -------------------------------------------------------------------- otherorg
+# https://tencentcloudssointl.com/otherorg/login
+#
+# A second realm costs a second approval — `tcloud login --all` groups by
+# auth_url. Note the role override: not every org publishes the same role
+# configurations, and a wrong role name is only caught at login, i.e. after the
+# browser approval has already been spent. `tcloud discover` lists the real ones
+# per account so this can be set correctly the first time.
+
+[profile otherorg-admin]
+uin      = 200000000004
+role     = Administrator
+auth_url = https://tencentcloudssointl.com/otherorg/login

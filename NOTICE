@@ -1,0 +1,11 @@
+tcloud-sso
+Copyright 2026 Xeshredemption
+
+This product includes logic adapted from the Tencent Cloud CLI
+(https://github.com/TencentCloud/tencentcloud-cli and
+https://github.com/TencentCloud/tencentcloud-cli-intl-en), Copyright Tencent,
+licensed under the Apache License, Version 2.0. The post-approval credential
+minting in `mint_credential` mirrors `tccli.plugins.sso.login.login()`.
+
+Not affiliated with or endorsed by Tencent. "Tencent Cloud" is a trademark of
+Tencent.

@@ -1,0 +1,21 @@
+# The real registry carries live account UINs — the example is what ships.
+accounts.conf
+
+# Credentials and tokens. These normally live in ~/.tccli, but a stray copy here
+# must never be committable.
+*.credential
+*.configure
+.tccli/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+.pytest_cache/
+.ruff_cache/
+
+# macOS
+.DS_Store

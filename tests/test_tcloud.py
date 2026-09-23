@@ -326,6 +326,13 @@ def test_nat_row_surfaces_a_restricted_gateway():
     assert row["eips"] == "203.0.113.7"
 
 
+def test_privatedns_row_tags_cross_account_vpcs_with_their_uin():
+    row = tcloud.RESOURCES["privatedns"]["row"]({
+        "VpcSet": [{"UniqVpcId": "vpc-own"}],
+        "AccountVpcSet": [{"Uin": "200000000001", "UniqVpcId": "vpc-other"}]})
+    assert row["vpcs"] == "vpc-own,200000000001:vpc-other"
+
+
 # ------------------------------------------------------------------ code-review fixes
 
 

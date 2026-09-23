@@ -242,6 +242,7 @@ tcloud stock ls --charge SPOTPAID --zone ap-singapore-2
 | `stock ls` | instance-type availability | regional |
 | `tke ls\|addons\|nodes` | TKE clusters, their addons, their nodes | regional |
 | `ccn ls\|routes\|attachments` | cloud connect networks | **global** |
+| `privatedns ls\|records` | private DNS zones with their bound VPCs, and their records | **global** |
 
 Shared flags: `--profile NAME` (repeatable), `--all`, `--region` (repeatable),
 `--home-region` to skip the all-region fan-out, `--state` to filter, `--json`,

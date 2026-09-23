@@ -1172,6 +1172,54 @@ RESOURCES = {
             },
         },
     },
+    "privatedns": {
+        "argv": ["privatedns", "DescribePrivateZoneList"],
+        "key": "PrivateZoneSet",
+        # Global, like ccn: verified by querying one account from ap-singapore,
+        # ap-hongkong and eu-frankfurt — every endpoint returned the same zone.
+        "regional": False,
+        "noun": "private zone",
+        "id_alias": "--zone-id",
+        "columns": (("id", "ZONE"), ("name", "DOMAIN"), ("records", "RECORDS"),
+                    ("state", "STATE"), ("forward", "FORWARD"), ("vpcs", "VPCS"),
+                    ("created", "CREATED")),
+        # A zone only resolves inside the vpcs bound to it, so the bindings are the
+        # useful part. Cross-account bindings (AccountVpcSet) are prefixed with the
+        # owning uin, since a bare vpc id says nothing about which account holds it.
+        "row": lambda z: {
+            "id": z.get("ZoneId", "?"),
+            "name": z.get("Domain") or "",
+            "records": z.get("RecordCount", 0),
+            "state": z.get("Status", ""),
+            "forward": z.get("DnsForwardStatus") or "-",
+            "vpcs": ",".join(
+                [v.get("UniqVpcId", "?") for v in z.get("VpcSet") or []]
+                + ["%s:%s" % (v.get("Uin", "?"), v.get("UniqVpcId", "?"))
+                   for v in z.get("AccountVpcSet") or []]) or "-",
+            "created": (z.get("CreatedOn") or "")[:10],
+        },
+        "children": {
+            "records": {
+                "argv": ["privatedns", "DescribePrivateZoneRecordList"],
+                "parent_arg": "--ZoneId",
+                "key": "RecordSet",
+                "noun": "dns record",
+                "parent_column": "zone",
+                "columns": (("zone", "ZONE"), ("id", "RECORD"), ("name", "NAME"),
+                            ("type", "TYPE"), ("value", "VALUE"), ("ttl", "TTL"),
+                            ("state", "STATE"), ("updated", "UPDATED")),
+                "row": lambda r: {
+                    "id": r.get("RecordId", "?"),
+                    "name": r.get("SubDomain", ""),
+                    "type": r.get("RecordType", ""),
+                    "value": r.get("RecordValue", ""),
+                    "ttl": r.get("TTL", ""),
+                    "state": r.get("Status", ""),
+                    "updated": (r.get("UpdatedOn") or "")[:10],
+                },
+            },
+        },
+    },
 }
 
 

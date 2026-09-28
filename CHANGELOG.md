@@ -11,6 +11,11 @@ All notable changes to this project are documented here. The format follows
 - `privatedns ls|records`: private DNS zones, with every bound VPC including
   cross-account ones, and the records in a zone (`--zone-id`). Global, one probe
   per profile.
+- `privatedns ls` shows the owning uin, splits own-account (`VPCS`) from
+  cross-account (`ACCOUNT-VPCS`) bindings, and adds `--vpc` to find the zones bound
+  to a VPC and `--records` to recount records instead of trusting `RecordCount`.
+- Resource scanners accept `--sso ORG` to scan one realm, like `login` and
+  `refresh`.
 
 ## [0.1.0] - 2026-09-14
 

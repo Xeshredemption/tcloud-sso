@@ -24,6 +24,8 @@ registry (~/.tccli/accounts.conf) and drives tccli from it.
   tcloud ccn ls              list cloud connect networks (global, one probe/profile)
   tcloud ccn routes          ccn routes; --ccn-id when a profile has more than one
   tcloud ccn attachments     ccn attachments, including PENDING ones
+  tcloud privatedns ls       private dns zones (global); --vpc finds a vpc's zones
+  tcloud privatedns records  records in a zone; --zone-id when a profile has several
   tcloud refresh [--sso ORG] re-mint from the stored token, no browser
   tcloud logout [--sso ORG]  delete local credential files (no server-side revoke)
 """
@@ -1180,9 +1182,12 @@ RESOURCES = {
         "regional": False,
         "noun": "private zone",
         "id_alias": "--zone-id",
-        "columns": (("id", "ZONE"), ("name", "DOMAIN"), ("records", "RECORDS"),
-                    ("state", "STATE"), ("forward", "FORWARD"), ("vpcs", "VPCS"),
-                    ("created", "CREATED")),
+        # Zones are shared across accounts, so which account owns one matters as much
+        # as which profile found it.
+        "uin_column": True,
+        "columns": (("name", "ZONE"), ("id", "ZONE-ID"), ("state", "STATUS"),
+                    ("vpcs", "VPCS"), ("account_vpcs", "ACCOUNT-VPCS"),
+                    ("records", "RECORDS"), ("forward", "FORWARD"), ("created", "CREATED")),
         # A zone only resolves inside the vpcs bound to it, so the bindings are the
         # useful part. Cross-account bindings (AccountVpcSet) are prefixed with the
         # owning uin, since a bare vpc id says nothing about which account holds it.
@@ -1192,12 +1197,18 @@ RESOURCES = {
             "records": z.get("RecordCount", 0),
             "state": z.get("Status", ""),
             "forward": z.get("DnsForwardStatus") or "-",
-            "vpcs": ",".join(
-                [v.get("UniqVpcId", "?") for v in z.get("VpcSet") or []]
-                + ["%s:%s" % (v.get("Uin", "?"), v.get("UniqVpcId", "?"))
-                   for v in z.get("AccountVpcSet") or []]) or "-",
+            "vpcs": ",".join(v.get("UniqVpcId", "?") for v in z.get("VpcSet") or []) or "-",
+            "account_vpcs": ",".join(
+                "%s:%s" % (v.get("Uin", "?"), v.get("UniqVpcId", "?"))
+                for v in z.get("AccountVpcSet") or []) or "-",
             "created": (z.get("CreatedOn") or "")[:10],
         },
+        # The api has no reverse lookup from a vpc to the zones bound to it, so
+        # --vpc matches client-side against both binding sets.
+        "vpcs_of": lambda z: {v.get("UniqVpcId") for v in (z.get("VpcSet") or [])
+                              + (z.get("AccountVpcSet") or [])},
+        # --records recounts through this child instead of trusting RecordCount.
+        "recount": "records",
         "children": {
             "records": {
                 "argv": ["privatedns", "DescribePrivateZoneRecordList"],
@@ -1260,12 +1271,20 @@ def cmd_resource(args, profiles):
     # did not.
     if args.state and "state" not in [key for key, _ in spec["columns"]]:
         die("%s %s has no state field — drop --state" % (args.cmd, action))
+    if action != "ls" and (getattr(args, "vpc", None) or getattr(args, "records", False)):
+        die("--vpc and --records apply to `%s ls` only" % args.cmd)
+    if args.sso and (args.all or args.profile):
+        die("--sso cannot be combined with --all or --profile")
 
     # Default to a single profile: a full fan-out is the expensive, deliberate case.
     # "first" means first declared in accounts.conf, not alphabetical — the registry
     # order is the one the user controls.
     if args.all:
         names = list(profiles)
+    elif args.sso:
+        # Registry order, not select_realms' dict order, so --sso and --all agree.
+        chosen = select_realms(profiles, args.sso)
+        names = [name for name in profiles if name in chosen]
     elif args.profile:
         names = args.profile
     else:
@@ -1312,8 +1331,16 @@ def cmd_resource(args, profiles):
             # completely different inventory.
             argv = spec["argv"] + (spec["argv_extra"](args) if spec.get("argv_extra") else [])
             if action == "ls":
-                return name, region, fetch_all(argv, spec["key"], name, region,
-                                               paginated=paginated), None
+                items = fetch_all(argv, spec["key"], name, region, paginated=paginated)
+                if getattr(args, "records", False):
+                    # A failed recount fails the whole profile: a zone showing a stale
+                    # or zero count would look like a real answer.
+                    child = spec["children"][spec["recount"]]
+                    for item in items:
+                        item["RecordCount"] = len(fetch_all(
+                            child["argv"] + [child["parent_arg"], spec["row"](item)["id"]],
+                            child["key"], name, region))
+                return name, region, items, None
             items = []
             parents = resolve_parents(parent_spec, args, name, region)
             matched.update(parents)
@@ -1334,15 +1361,19 @@ def cmd_resource(args, profiles):
         for missing in sorted(set(getattr(args, "%s_id" % args.cmd, None) or ()) - matched):
             errors.append(("-", "-", "%s %s not found in any scanned profile or region" % (
                 parent_spec["noun"], missing)))
+    wanted_vpcs = set(getattr(args, "vpc", None) or ())
     rows = []
     for name, region, items, _ in results:
         for item in items or []:
+            if wanted_vpcs and not wanted_vpcs & spec["vpcs_of"](item):
+                continue
             row = spec["row"](item)
             if "_parent" in item:
                 row[spec.get("parent_column", args.cmd)] = item["_parent"]
             if args.state and str(row["state"]).upper() != args.state.upper():
                 continue
-            row.update(profile=name, env=profiles[name].get("env", "-"), region=region)
+            row.update(profile=name, env=profiles[name].get("env", "-"), region=region,
+                       uin=profiles[name].get("uin", "-"))
             rows.append(row)
 
     if args.json:
@@ -1353,6 +1384,7 @@ def cmd_resource(args, profiles):
         sys.exit(1 if errors else 0)
 
     columns = ((("profile", "PROFILE"),)
+               + ((("uin", "UIN"),) if parent_spec.get("uin_column") else ())
                + ((("region", "REGION"),) if regional else ())
                + spec["columns"])
 
@@ -1365,7 +1397,9 @@ def cmd_resource(args, profiles):
             tag = " %s[prod]%s" % (Colour.bad, Colour.off) if r["env"] == "prod" else ""
             print("%s%s" % (fmt % sum(zip(widths, [r[k] for k, _ in columns]), ()), tag))
     else:
-        print("%sno %ss%s" % (Colour.dim, spec["noun"], Colour.off))
+        print("%sno %ss%s%s" % (Colour.dim, spec["noun"],
+                                " bound to " + ",".join(sorted(wanted_vpcs)) if wanted_vpcs
+                                else "", Colour.off))
 
     # Always state the denominator: an empty table is only meaningful next to the
     # number of probes that actually succeeded.
@@ -1462,6 +1496,16 @@ def main():
         p_res.add_argument("--profile", action="append",
                            help="profile to scan, repeatable (default: first in accounts.conf)")
         p_res.add_argument("--all", action="store_true", help="scan every profile")
+        p_res.add_argument("--sso", action="append", metavar="ORG",
+                           help="scan every profile in this sso realm, repeatable")
+        if spec.get("vpcs_of"):
+            p_res.add_argument("--vpc", action="append", metavar="VPC_ID",
+                               help="only %ss bound to this vpc, own-account or "
+                                    "cross-account, repeatable" % spec["noun"])
+        if spec.get("recount"):
+            p_res.add_argument("--records", action="store_true",
+                               help="count records with one extra call per %s instead of "
+                                    "trusting its RecordCount" % spec["noun"])
         p_res.add_argument("--region", action="append",
                            help="region to scan, repeatable%s" % (
                                " (default: every available region)" if spec["regional"]

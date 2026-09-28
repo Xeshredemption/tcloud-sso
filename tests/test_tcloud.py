@@ -326,6 +326,14 @@ def test_nat_row_surfaces_a_restricted_gateway():
     assert row["eips"] == "203.0.113.7"
 
 
+def test_privatedns_row_tags_cross_account_vpcs_with_their_uin():
+    row = tcloud.RESOURCES["privatedns"]["row"]({
+        "VpcSet": [{"UniqVpcId": "vpc-own"}],
+        "AccountVpcSet": [{"Uin": "200000000001", "UniqVpcId": "vpc-other"}]})
+    assert row["vpcs"] == "vpc-own"
+    assert row["account_vpcs"] == "200000000001:vpc-other"
+
+
 # ------------------------------------------------------------------ code-review fixes
 
 
@@ -348,7 +356,8 @@ SCAN_PROFILES = {"p1": {"region": "r1"}, "p2": {"region": "r1"}}
 
 def scan_args(**overrides):
     base = dict(cmd="tke", action="nodes", state=None, all=False, profile=["p1", "p2"],
-                region=["r1"], home_region=False, workers=2, json=True, tke_id=None)
+                sso=None, region=["r1"], home_region=False, workers=2, json=True,
+                tke_id=None)
     base.update(overrides)
     return argparse.Namespace(**base)
 
@@ -399,6 +408,95 @@ def test_profile_without_region_is_counted_not_skipped(monkeypatch, capsys):
     assert exit_info.value.code == 1
     assert out["probes"] == 1 and len(out["vpcs"]) == 1
     assert out["errors"][0]["profile"] == "p2"
+
+
+REAL_FETCH_ALL = tcloud.fetch_all
+DNS_PROFILES = {"own": {"region": "r1", "uin": "200000000001", "auth_url": URL},
+                "peer": {"region": "r1", "uin": "200000000002", "auth_url": URL},
+                "else": {"region": "r1", "uin": "200000000003", "auth_url": OTHER}}
+ZONES = {
+    "own": [{"ZoneId": "zone-a", "Domain": "a.example", "Status": "ENABLED", "RecordCount": 9,
+             "VpcSet": [{"UniqVpcId": "vpc-own"}],
+             "AccountVpcSet": [{"Uin": "200000000002", "UniqVpcId": "vpc-peer"}]},
+            {"ZoneId": "zone-b", "Domain": "b.example", "Status": "ENABLED", "RecordCount": 0,
+             "VpcSet": [{"UniqVpcId": "vpc-own"}]}],
+    "peer": [{"ZoneId": "zone-c", "Domain": "c.example", "Status": "ENABLED",
+              "RecordCount": 1, "VpcSet": [{"UniqVpcId": "vpc-peer2"}]}],
+    "else": [],
+}
+
+
+def run_dns_scan(monkeypatch, capsys, calls=None, failing=(), **overrides):
+    """A fake tccli that pages one item at a time, so pagination is exercised too."""
+    def tccli_json(argv, profile, region=None):
+        if calls is not None:
+            calls.append((profile, region, argv[1]))
+        if profile in failing:
+            raise ValueError("AuthFailure.UnauthorizedOperation")
+        offset = int(argv[argv.index("--Offset") + 1])
+        if argv[1] == "DescribePrivateZoneList":
+            zones = ZONES[profile]
+            return {"TotalCount": len(zones), "PrivateZoneSet": zones[offset:offset + 1]}
+        zone = argv[argv.index("--ZoneId") + 1]
+        records = [{"RecordId": "%s-%d" % (zone, i)} for i in range(2)]
+        return {"TotalCount": len(records), "RecordSet": records[offset:offset + 1]}
+
+    monkeypatch.setattr(tcloud, "tccli_json", tccli_json)
+    monkeypatch.setattr(tcloud, "fetch_all", lambda argv, key, profile, region=None, **kw:
+                        REAL_FETCH_ALL(argv, key, profile, region, page=1, **kw))
+    base = dict(cmd="privatedns", action="ls", profile=None, all=True, region=None,
+                vpc=None, records=False)
+    base.update(overrides)
+    with pytest.raises(SystemExit) as exit_info:
+        tcloud.cmd_resource(scan_args(**base), DNS_PROFILES)
+    return exit_info.value.code, json.loads(capsys.readouterr().out)
+
+
+def test_privatedns_is_one_probe_per_profile_and_tags_the_uin(monkeypatch, capsys):
+    calls = []
+    code, out = run_dns_scan(monkeypatch, capsys, calls=calls)
+    assert code == 0 and out["probes"] == 3 and out["errors"] == []
+    # Paged one item at a time, but never fanned out beyond the profile's own region.
+    assert {(p, region) for p, region, _ in calls} == {("own", "r1"), ("peer", "r1"),
+                                                       ("else", "r1")}
+    assert [(r["profile"], r["uin"], r["id"]) for r in out["private_zones"]] == [
+        ("own", "200000000001", "zone-a"), ("own", "200000000001", "zone-b"),
+        ("peer", "200000000002", "zone-c")]
+
+
+def test_privatedns_vpc_filter_matches_own_and_cross_account_bindings(monkeypatch, capsys):
+    _, out = run_dns_scan(monkeypatch, capsys, vpc=["vpc-own"])
+    assert [r["id"] for r in out["private_zones"]] == ["zone-a", "zone-b"]
+    _, out = run_dns_scan(monkeypatch, capsys, vpc=["vpc-peer"])
+    assert [r["id"] for r in out["private_zones"]] == ["zone-a"]
+    _, out = run_dns_scan(monkeypatch, capsys, vpc=["vpc-nowhere"])
+    assert out["private_zones"] == [] and out["probes"] == 3
+
+
+def test_privatedns_errored_profile_never_looks_like_no_zones(monkeypatch, capsys):
+    code, out = run_dns_scan(monkeypatch, capsys, failing={"else"})
+    assert code == 1 and out["probes"] == 3
+    assert out["errors"] == [{"profile": "else", "region": "r1",
+                              "error": "AuthFailure.UnauthorizedOperation"}]
+
+
+def test_privatedns_records_recounts_instead_of_trusting_recordcount(monkeypatch, capsys):
+    _, out = run_dns_scan(monkeypatch, capsys)
+    assert [r["records"] for r in out["private_zones"]] == [9, 0, 1]
+    _, out = run_dns_scan(monkeypatch, capsys, records=True)
+    assert [r["records"] for r in out["private_zones"]] == [2, 2, 2]
+
+
+def test_resource_scan_by_sso_realm_keeps_registry_order(monkeypatch, capsys):
+    calls = []
+    _, out = run_dns_scan(monkeypatch, capsys, calls=calls, all=False, sso=["myorg"])
+    assert out["probes"] == 2 and {p for p, _, _ in calls} == {"own", "peer"}
+
+
+def test_resource_scan_rejects_sso_with_all():
+    with pytest.raises(SystemExit):
+        tcloud.cmd_resource(scan_args(cmd="privatedns", action="ls", all=True, profile=None,
+                                      sso=["myorg"], vpc=None, records=False), DNS_PROFILES)
 
 
 LOGIN_PROFILES = {"p": {"uin": "200000000001", "role": "ReadOnly", "auth_url": URL}}

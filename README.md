@@ -229,6 +229,10 @@ tcloud cvm ls                       # first profile in the registry
 tcloud vpc ls --all --home-region   # every profile, its configured region only
 tcloud tke nodes --cluster-id cls-xxxx
 tcloud stock ls --charge SPOTPAID --zone ap-singapore-2
+tcloud privatedns ls --sso myorg                   # zones in one realm, with their uin
+tcloud privatedns ls --all --vpc vpc-xxxx          # which zones does this vpc resolve?
+tcloud privatedns ls --all --records               # recount records per zone
+tcloud privatedns records --profile app-dev --zone-id zone-xxxx
 ```
 
 | Command | Lists | Scope |
@@ -242,13 +246,20 @@ tcloud stock ls --charge SPOTPAID --zone ap-singapore-2
 | `stock ls` | instance-type availability | regional |
 | `tke ls\|addons\|nodes` | TKE clusters, their addons, their nodes | regional |
 | `ccn ls\|routes\|attachments` | cloud connect networks | **global** |
+| `privatedns ls\|records` | private DNS zones with their bound VPCs, and their records | **global** |
 
-Shared flags: `--profile NAME` (repeatable), `--all`, `--region` (repeatable),
-`--home-region` to skip the all-region fan-out, `--state` to filter, `--json`,
-`--workers N`.
+Shared flags: `--profile NAME` (repeatable), `--sso ORG` (repeatable), `--all`,
+`--region` (repeatable), `--home-region` to skip the all-region fan-out, `--state`
+to filter, `--json`, `--workers N`.
 
 They all default to the **first profile in the registry**, not to everything —
-`--profile` or `--all` widens it.
+`--profile`, `--sso` or `--all` widens it.
+
+`privatedns ls` lists own-account bindings (`VPCS`) and cross-account ones
+(`ACCOUNT-VPCS`, as `uin:vpc`) separately. The API has no lookup from a VPC to its
+zones, so `--vpc` filters client-side across both. A zone shadows its whole apex
+inside every VPC it is bound to. `--records` replaces the zone's own `RecordCount`
+with a count from `DescribePrivateZoneRecordList`, at one extra call per zone.
 
 **Every scan prints its denominator:**
 
